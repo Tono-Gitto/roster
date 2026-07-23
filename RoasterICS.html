@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Roster → Calendar</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .dropzone { transition: border-color .2s, background-color .2s; }
+    .dropzone.dragover { border-color: #6366f1; background-color: #eef2ff; }
+    .file-loaded { border-color: #22c55e !important; background-color: #f0fdf4 !important; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen font-sans text-gray-800">
+
+  <header class="bg-indigo-600 text-white py-6 shadow-md">
+    <div class="max-w-4xl mx-auto px-4">
+      <h1 class="text-2xl font-bold tracking-tight">Roster → Calendar</h1>
+      <p class="text-indigo-200 text-sm mt-1">Upload your crew schedule slip PDF to generate a Google Calendar (.ics) file.</p>
+    </div>
+  </header>
+
+  <main class="max-w-4xl mx-auto px-4 py-8 space-y-8">
+
+    <section>
+      <div id="dropPdf" class="dropzone border-2 border-dashed border-gray-300 rounded-xl p-10 text-center cursor-pointer hover:border-indigo-400 bg-white shadow">
+        <input type="file" id="filePdf" accept="application/pdf" class="hidden" />
+        <svg class="mx-auto h-12 w-12 text-gray-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+        </svg>
+        <p id="pdfLabel" class="text-sm text-gray-500">Click or drag & drop your roster PDF</p>
+        <p class="text-xs text-gray-400 mt-1">Thai Airways Crew Schedule Slip format</p>
+      </div>
+    </section>
+
+    <div class="flex gap-4">
+      <button id="btnPreview" disabled
+        class="flex-1 bg-indigo-600 text-white font-semibold py-3 rounded-xl shadow hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition">
+        Preview Schedule
+      </button>
+      <button id="btnReset" class="px-6 py-3 border border-gray-300 text-gray-600 font-semibold rounded-xl hover:bg-gray-100 transition">
+        Start Over
+      </button>
+    </div>
+
+    <div id="loadingBar" class="hidden">
+      <div class="flex items-center gap-3 justify-center py-6">
+        <svg class="animate-spin h-6 w-6 text-indigo-600" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
+        </svg>
+        <span class="text-sm text-gray-600">Parsing your roster PDF…</span>
+      </div>
+    </div>
+
+    <div id="errorBox" class="hidden bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm"></div>
+
+    <details id="debugSection" class="hidden">
+      <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-600">Show extracted raw text</summary>
+      <pre id="rawText" class="mt-2 bg-gray-100 rounded-lg p-4 text-xs text-gray-600 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap"></pre>
+    </details>
+
+    <section id="previewSection" class="hidden">
+      <h2 class="text-lg font-bold mb-3">Schedule Preview</h2>
+      <div class="overflow-x-auto bg-white rounded-xl shadow">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-100 text-left text-gray-600">
+            <tr>
+              <th class="px-4 py-3"><input type="checkbox" id="checkAll" checked class="w-4 h-4 cursor-pointer" title="Select all"></th>
+              <th class="px-4 py-3">Date</th>
+              <th class="px-4 py-3">Type</th>
+              <th class="px-4 py-3">Duty</th>
+              <th class="px-4 py-3">Local Time</th>
+              <th class="px-4 py-3">Location</th>
+            </tr>
+          </thead>
+          <tbody id="previewBody"></tbody>
+        </table>
+      </div>
+      <p id="statsSummary" class="text-xs text-gray-400 mt-2 px-1"></p>
+      <button id="btnDownload"
+        class="mt-4 w-full bg-green-600 text-white font-semibold py-3 rounded-xl shadow hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed transition">
+        Download .ics File
+      </button>
+    </section>
+  </main>
+
+  <footer class="text-center text-xs text-gray-400 py-6">All processing happens locally in your browser.</footer>
+
+<script type="module">
+const pdfjsLib = await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.min.mjs');
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.worker.min.mjs';
+
+const $ = id => document.getElementById(id);
+let pdfFile = null;
+let parsedDuties = [];
+
+/* ---------- Constants ---------- */
+const IATA = new Set([
+  'BKK','DMK','CNX','HKT','USM','KBV','CEI','HDY','UTP','UTH',
+  'LHR','LGW','MAN','EDI','BRU','CDG','ORY','FRA','MUC','AMS',
+  'FCO','MXP','MAD','BCN','ZRH','VIE','CPH','ARN','OSL','HEL',
+  'WAW','PRG','LIS','ATH','IST','SVO','DME',
+  'NRT','HND','KIX','ICN','GMP','PVG','PEK','PKX','HKG','TPE','CAN',
+  'SIN','KUL','CGK','DPS','MNL','CEB','HAN','SGN','RGN','PNH',
+  'DEL','BOM','CCU','DAC','KTM','CMB','MLE',
+  'SYD','MEL','PER','BNE','AKL',
+  'DXB','DOH','RUH','JED','MCT','BAH','KWI','AMM',
+  'JFK','EWR','LAX','SFO','ORD','IAD','SEA','YVR','YYZ',
+  'GRU','MEX','JNB','NBO','ADD','CAI',
+]);
+
+const MONTHS = { JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11 };
+
+/* ---------- File upload ---------- */
+const drop  = $('dropPdf');
+const input = $('filePdf');
+drop.addEventListener('click', () => input.click());
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('dragover'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('dragover'); loadFile(e.dataTransfer.files[0]); });
+input.addEventListener('change', () => { if (input.files[0]) loadFile(input.files[0]); });
+
+function loadFile(file) {
+  if (!file || file.type !== 'application/pdf') { showError('Please upload a PDF file.'); return; }
+  pdfFile = file;
+  $('pdfLabel').textContent = file.name;
+  drop.classList.add('file-loaded');
+  $('btnPreview').disabled = false;
+  $('errorBox').classList.add('hidden');
+}
+
+$('btnReset').addEventListener('click', resetAll);
+function resetAll() {
+  pdfFile = null;
+  parsedDuties = [];
+  input.value = '';
+  $('pdfLabel').textContent = 'Click or drag & drop your roster PDF';
+  drop.classList.remove('file-loaded');
+  $('btnPreview').disabled = true;
+  $('previewSection').classList.add('hidden');
+  $('errorBox').classList.add('hidden');
+  $('loadingBar').classList.add('hidden');
+  $('debugSection').classList.add('hidden');
+}
+
+function showError(msg) {
+  const b = $('errorBox');
+  b.textContent = msg;
+  b.classList.remove('hidden');
+}
+
+/* ---------- Phase 1: extract positioned text from PDF ---------- */
+async function extractPdfItems(file) {
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const items = [];
+  const rawLines = [];
+
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const pageItems = [];
+
+    for (const item of content.items) {
+      if (!item.str || !item.str.trim()) continue;
+      pageItems.push({
+        x: item.transform[4],
+        y: item.transform[5],
+        w: item.width || 0,
+        text: item.str.trim(),
+        page: p
+      });
+    }
+    items.push(...pageItems);
+
+    const rows = {};
+    for (const it of pageItems) {
+      const y = Math.round(it.y / 2) * 2;
+      (rows[y] ||= []).push(it);
+    }
+    for (const y of Object.keys(rows).map(Number).sort((a, b) => b - a)) {
+      rows[y].sort((a, b) => a.x - b.x);
+      rawLines.push(rows[y].map(i => i.text).join('\t'));
+    }
+  }
+
+  return { items, rawText: rawLines.join('\n') };
+}
+
+/* ---------- Phase 2: build per-day grid from positions ---------- */
+function buildGrid(items) {
+  const dateRe = /^(\d{1,2})(SUN|MON|TUE|WED|THU|FRI|SAT)$/i;
+  const dayHeaders = [];
+  for (const item of items) {
+    const m = item.text.match(dateRe);
+    if (m) dayHeaders.push({ day: parseInt(m[1]), x: item.x, y: item.y });
+  }
+  if (!dayHeaders.length) return null;
+  dayHeaders.sort((a, b) => a.day - b.day);
+
+  let rosterYear = new Date().getFullYear();
+  let rosterMonth = new Date().getMonth();
+  const myRe = /(\d{1,2})\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s*(\d{2,4})/i;
+  for (const item of items) {
+    const m = item.text.match(myRe);
+    if (m) {
+      rosterMonth = MONTHS[m[2].toUpperCase().substring(0, 3)];
+      rosterYear = parseInt(m[3]);
+      if (rosterYear < 100) rosterYear += 2000;
+      break;
+    }
+  }
+
+  const dayColX = {};
+  for (const h of dayHeaders) dayColX[h.day] = h.x;
+  const days = Object.keys(dayColX).map(Number).sort((a, b) => a - b);
+
+  const boundaries = [];
+  for (let i = 0; i < days.length; i++) {
+    const prevX = i > 0 ? dayColX[days[i - 1]] : null;
+    const nextX = i < days.length - 1 ? dayColX[days[i + 1]] : null;
+    const colW = nextX !== null && prevX !== null
+      ? (nextX - prevX) / 2
+      : nextX !== null ? nextX - dayColX[days[i]] : prevX !== null ? dayColX[days[i]] - prevX : 20;
+    boundaries.push({
+      day: days[i],
+      left:  prevX !== null ? (prevX + dayColX[days[i]]) / 2 : dayColX[days[i]] - colW,
+      right: nextX !== null ? (dayColX[days[i]] + nextX) / 2 : dayColX[days[i]] + colW,
+    });
+  }
+
+  const findColumn = x => {
+    for (const b of boundaries) if (x >= b.left && x < b.right) return b.day;
+    return null;
+  };
+
+  const headerY = dayHeaders[0].y;
+
+  let separatorY = null;
+  for (const item of items) {
+    if (/^\*{3,}$/.test(item.text) && item.y < headerY) {
+      separatorY = (separatorY === null) ? item.y : Math.max(separatorY, item.y);
+    }
+  }
+
+  let notesTopY = -Infinity;
+  for (const item of items) {
+    if (item.y >= headerY) continue;
+    if (/DUE DATE|Indicator\s+Description|^Blocktime$/i.test(item.text)) {
+      notesTopY = Math.max(notesTopY, item.y);
+    }
+  }
+
+  const leftBound = boundaries[0]?.left || 0;
+
+  const dayItems = {};
+  for (let d = 1; d <= 31; d++) dayItems[d] = [];
+
+  for (const item of items) {
+    if (item.y >= headerY - 1) continue;
+    if (separatorY !== null && item.y >= separatorY) continue;
+    if (notesTopY !== -Infinity && item.y <= notesTopY + 1) continue;
+    if (item.x < leftBound - 5) continue;
+    if (/^(DUTY|FLT|DEP|ARR|DATE|REMARK)$/i.test(item.text) && item.x < leftBound + 5) continue;
+    if (/^\*{3,}/.test(item.text)) continue;
+
+    const col = findColumn(item.x);
+    if (col && dayItems[col]) dayItems[col].push(item);
+  }
+
+  for (const d of Object.keys(dayItems)) dayItems[d].sort((a, b) => b.y - a.y);
+
+  return {
+    dayItems,
+    rosterYear,
+    rosterMonth,
+    daysInMonth: new Date(rosterYear, rosterMonth + 1, 0).getDate()
+  };
+}
+
+/* ---------- Phase 3: parse a single day column into 0+ duties ---------- */
+/* Two-track output:
+ *   • Real flights (TG flights with known IATA airports) → rich FLT/P duty
+ *     that flows through the IATA/DST/check-in pipeline downstream.
+ *   • Anything else (SIM, GRD, SBY, AL, SIC, TRG, R-codes, unrecognized)
+ *     → one plain DUTY event per day in BKK time, no check-in. */
+function parseDayColumn(dayNum, items, year, month) {
+  const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+
+  const tokens = items.map(it => it.text.trim()).filter(Boolean);
+  if (!tokens.length) return [];
+  const hasOffMarker    = tokens.some(t => /^(OFF|LEAVE)$/i.test(t));
+  const hasFlightSignal = tokens.some(t =>
+    /^\d{3,4}$/.test(t) || (/^[A-Z]{3}$/.test(t) && IATA.has(t.toUpperCase()))
+  );
+  if (hasOffMarker && !hasFlightSignal) return [];
+
+  const segments = [];
+  let cur = null;
+  const pushSeg = () => { if (cur) { segments.push(cur); cur = null; } };
+
+  for (const item of items) {
+    const t  = item.text.trim();
+    const tu = t.toUpperCase();
+
+    const indicFlt = t.match(/^([A-Z])\s+(SIM[A-Z0-9]+|\d{3,4})$/i);
+    if (indicFlt) {
+      const code = indicFlt[2].toUpperCase();
+      pushSeg();
+      cur = {
+        num: /^SIM/i.test(code) ? code : 'TG' + code,
+        airports: [], times: [],
+        dh: indicFlt[1].toUpperCase() === 'P'
+      };
+      continue;
+    }
+
+    const fltM = t.match(/^(\d{3,4})$/) || t.match(/^(SIM[A-Z0-9]+)$/i);
+    if (fltM) {
+      const code = fltM[1].toUpperCase();
+      pushSeg();
+      cur = { num: /^SIM/i.test(code) ? code : 'TG' + code, airports: [], times: [], dh: false };
+      continue;
+    }
+
+    if (/^[A-Z]{3}$/.test(tu) && IATA.has(tu)) {
+      if (cur) cur.airports.push(tu);
+      continue;
+    }
+
+    const timeM = t.match(/^(\d{2}):(\d{2})$/);
+    if (timeM && cur) {
+      const hh = parseInt(timeM[1]), mn = parseInt(timeM[2]);
+      if (hh <= 23 && mn <= 59) {
+        cur.times.push(`${String(hh).padStart(2,'0')}:${String(mn).padStart(2,'0')}`);
+      }
+    }
+  }
+  pushSeg();
+
+  const realFlights = segments.filter(s =>
+    !/^SIM/i.test(s.num) &&
+    s.times.length >= 1 &&
+    s.airports.length >= 1 &&
+    IATA.has(s.airports[0]) &&
+    (s.airports[1] === undefined || IATA.has(s.airports[1]))
+  );
+
+  if (realFlights.length) {
+    return realFlights.map(s => {
+      const ua = [...new Set(s.airports)];
+      const ut = [...new Set(s.times)];
+      return {
+        date: dateStr,
+        type: s.dh ? 'P' : 'FLT',
+        duty: s.num,
+        start_local: ut[0] || null,
+        end_local:   ut[1] || null,
+        origin:      ua[0] || 'BKK',
+        destination: ua[1] || null,
+        base: 'BKK'
+      };
+    });
+  }
+
+  return [buildSimpleDuty(dateStr, tokens)];
+}
+
+function buildSimpleDuty(dateStr, tokens) {
+  const parts = [];
+  for (const tok of tokens) {
+    for (const p of tok.split(/\s+/)) if (p) parts.push(p);
+  }
+
+  const times  = [];
+  const labels = [];
+  for (const p of parts) {
+    if (/^\d{2}:\d{2}$/.test(p)) {
+      const [hh, mm] = p.split(':').map(Number);
+      if (hh <= 23 && mm <= 59) times.push(p);
+      continue;
+    }
+    if (/^[A-Z]$/i.test(p)) continue;
+    labels.push(p);
+  }
+
+  const seen = new Set();
+  const out  = [];
+  for (let p of labels) {
+    if (/^\d{3,4}$/.test(p)) p = 'TG' + p;
+    const key = p.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+
+  const uniqTimes = [...new Set(times)];
+  const labelStr  = out.join(' ');
+  const timeStr   = uniqTimes.length >= 2
+    ? `${uniqTimes[0]}-${uniqTimes[uniqTimes.length - 1]}`
+    : (uniqTimes[0] || '');
+  const summary = [labelStr, timeStr].filter(Boolean).join(' ').trim();
+
+  return {
+    date: dateStr,
+    type: 'DUTY',
+    duty: out[0] || 'DUTY',
+    start_local: uniqTimes[0] || null,
+    end_local:   uniqTimes.length >= 2 ? uniqTimes[uniqTimes.length - 1] : null,
+    origin: null, destination: null, base: null,
+    summary: summary || (out[0] || 'Duty')
+  };
+}
+
+/* ---------- Multi-day flight fix-up ---------- */
+function postProcessFlights(duties, dayItems, daysInMonth) {
+  const consumedDates = new Set();
+
+  for (const d of duties) {
+    if (d.type !== 'FLT' && d.type !== 'P') continue;
+    if (d.end_local && d.destination) continue;
+
+    const nextDay = parseInt(d.date.split('-')[2]) + 1;
+    if (nextDay > daysInMonth || !dayItems[nextDay]) continue;
+
+    const nextAirports = [];
+    const nextTimes = [];
+    let nextHasDuty = false;
+
+    for (const item of dayItems[nextDay]) {
+      const tu = item.text.toUpperCase().trim();
+      if (/^(GRD|OFF|AL|SIC|SBY|R\d|TRG|LEAVE)$/i.test(tu)) nextHasDuty = true;
+      if (/^\d{3,4}$/.test(tu) || /^[A-Z]\s+\d{3,4}$/.test(tu)) nextHasDuty = true;
+      if (/^[A-Z]{3}$/.test(tu) && IATA.has(tu)) nextAirports.push(tu);
+      if (/^\d{2}:\d{2}$/.test(item.text)) nextTimes.push(item.text);
+    }
+
+    if (nextHasDuty) continue;
+
+    let used = false;
+    if (!d.destination && nextAirports.length) { d.destination = nextAirports[0]; used = true; }
+    if (!d.end_local   && nextTimes.length)    { d.end_local   = nextTimes.at(-1); used = true; }
+
+    // nextHasDuty was false, so nextDay's column held nothing but this
+    // arrival's leftover airport/time — the standalone duty parseDayColumn
+    // built from those same tokens is a parsing artifact, not a real duty.
+    if (used) {
+      const [y, m] = d.date.split('-');
+      consumedDates.add(`${y}-${m}-${String(nextDay).padStart(2, '0')}`);
+    }
+  }
+
+  if (consumedDates.size) {
+    for (let i = duties.length - 1; i >= 0; i--) {
+      if (duties[i].type === 'DUTY' && consumedDates.has(duties[i].date)) duties.splice(i, 1);
+    }
+  }
+}
+
+function parseRoster(items) {
+  const grid = buildGrid(items);
+  if (!grid) return [];
+
+  const { dayItems, rosterYear, rosterMonth, daysInMonth } = grid;
+  const duties = [];
+  for (let d = 1; d <= daysInMonth; d++) {
+    duties.push(...parseDayColumn(d, dayItems[d] || [], rosterYear, rosterMonth));
+  }
+  postProcessFlights(duties, dayItems, daysInMonth);
+  return duties;
+}
+
+/* ---------- Preview ---------- */
+$('btnPreview').addEventListener('click', async () => {
+  $('loadingBar').classList.remove('hidden');
+  $('errorBox').classList.add('hidden');
+  $('previewSection').classList.add('hidden');
+  $('btnPreview').disabled = true;
+
+  try {
+    const { items, rawText } = await extractPdfItems(pdfFile);
+    $('rawText').textContent = rawText;
+    $('debugSection').classList.remove('hidden');
+
+    const duties = parseRoster(items);
+    if (!duties.length) throw new Error('No duties found. The PDF format may not be recognized.');
+
+    parsedDuties = duties.sort((a, b) => a.date.localeCompare(b.date));
+
+    if (!parsedDuties.length) throw new Error('No duties found. The PDF format may not be recognized.');
+    renderPreview();
+  } catch (err) {
+    showError(err.message || 'Failed to parse the PDF.');
+  } finally {
+    $('loadingBar').classList.add('hidden');
+    $('btnPreview').disabled = false;
+  }
+});
+
+const TYPE_BADGE = {
+  FLT:  'bg-blue-100 text-blue-800',
+  P:    'bg-purple-100 text-purple-800',
+  DUTY: 'bg-gray-100 text-gray-800',
+  GRD:  'bg-yellow-100 text-yellow-800',
+  SBY:  'bg-orange-100 text-orange-800',
+  AL:   'bg-green-100 text-green-800',
+  SIC:  'bg-red-100 text-red-800',
+};
+
+function renderPreview() {
+  const tbody = $('previewBody');
+  tbody.innerHTML = '';
+
+  for (let i = 0; i < parsedDuties.length; i++) {
+    const d = parsedDuties[i];
+    const timeStr = d.start_local && d.end_local
+      ? `${d.start_local} – ${d.end_local}`
+      : (d.type === 'AL' || d.type === 'SIC') ? 'All Day' : (d.start_local || '—');
+    const locParts = [d.origin, d.destination].filter(Boolean);
+    const locStr = locParts.length === 2 ? `${locParts[0]} → ${locParts[1]}` : (locParts[0] || d.base || '—');
+    const badge = TYPE_BADGE[d.type] || 'bg-gray-100 text-gray-800';
+
+    const tr = document.createElement('tr');
+    tr.className = 'border-t border-gray-100 hover:bg-gray-50';
+    tr.innerHTML = `
+      <td class="px-4 py-2"><input type="checkbox" class="dutyCheck w-4 h-4 cursor-pointer" data-i="${i}" checked></td>
+      <td class="px-4 py-2 font-mono text-xs">${esc(d.date)}</td>
+      <td class="px-4 py-2"><span class="px-2 py-0.5 rounded text-xs font-semibold ${badge}">${esc(d.type)}</span></td>
+      <td class="px-4 py-2 font-medium">${esc(d.duty || '—')}</td>
+      <td class="px-4 py-2 text-sm">${esc(timeStr)}</td>
+      <td class="px-4 py-2 text-sm">${esc(locStr)}</td>`;
+    tbody.appendChild(tr);
+  }
+
+  const checkAll = $('checkAll');
+  checkAll.checked = true;
+  checkAll.indeterminate = false;
+  updateSelectionStats();
+  $('previewSection').classList.remove('hidden');
+}
+
+function updateSelectionStats() {
+  const checks = [...document.querySelectorAll('.dutyCheck')];
+  const selected = checks.filter(c => c.checked);
+  const counts = {};
+  for (const c of selected) {
+    const d = parsedDuties[parseInt(c.dataset.i)];
+    counts[d.type] = (counts[d.type] || 0) + 1;
+  }
+  const n = selected.length;
+  $('statsSummary').textContent =
+    `${n} of ${parsedDuties.length} duties selected · ` +
+    Object.entries(counts).map(([k, v]) => `${k}: ${v}`).join(' · ');
+  $('btnDownload').textContent = `Download ${n} ${n === 1 ? 'duty' : 'duties'} as .ics`;
+  $('btnDownload').disabled = n === 0;
+}
+
+const esc = s => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+
+/* ---------- Timezone / DST ---------- */
+const FIXED_OFFSETS = {
+  BKK:7,DMK:7,CNX:7,HKT:7,USM:7,KBV:7,CEI:7,HDY:7,UTP:7,UTH:7,
+  KUL:8,SIN:8,NRT:9,HND:9,KIX:9,ICN:9,GMP:9,
+  PVG:8,PEK:8,PKX:8,HKG:8,TPE:8,MNL:8,CEB:8,CAN:8,
+  DEL:5.5,BOM:5.5,CCU:5.5,CMB:5.5,DAC:6,KTM:5.75,MLE:5,
+  SYD:11,MEL:11,PER:8,BNE:10,AKL:12,
+  DXB:4,DOH:3,RUH:3,JED:3,MCT:4,BAH:3,KWI:3,AMM:3,
+  CGK:7,DPS:8,HAN:7,SGN:7,RGN:6.5,PNH:7,
+  ADD:3,CAI:2,JNB:2,NBO:3,GRU:-3,MEX:-6,
+};
+const EUROPE_DST = {
+  LHR:{std:0,dst:1},LGW:{std:0,dst:1},MAN:{std:0,dst:1},EDI:{std:0,dst:1},
+  BRU:{std:1,dst:2},CDG:{std:1,dst:2},ORY:{std:1,dst:2},
+  FRA:{std:1,dst:2},MUC:{std:1,dst:2},AMS:{std:1,dst:2},
+  FCO:{std:1,dst:2},MXP:{std:1,dst:2},MAD:{std:1,dst:2},BCN:{std:1,dst:2},
+  ZRH:{std:1,dst:2},VIE:{std:1,dst:2},CPH:{std:1,dst:2},
+  ARN:{std:1,dst:2},OSL:{std:1,dst:2},HEL:{std:2,dst:3},
+  WAW:{std:1,dst:2},PRG:{std:1,dst:2},LIS:{std:0,dst:1},ATH:{std:2,dst:3},
+  IST:{std:3,dst:3},SVO:{std:3,dst:3},DME:{std:3,dst:3},
+};
+const US_DST = {
+  LAX:{std:-8,dst:-7},SFO:{std:-8,dst:-7},JFK:{std:-5,dst:-4},
+  EWR:{std:-5,dst:-4},ORD:{std:-6,dst:-5},IAD:{std:-5,dst:-4},SEA:{std:-8,dst:-7},
+  YVR:{std:-8,dst:-7},YYZ:{std:-5,dst:-4},
+};
+
+function getUtcOffset(iata, dateStr) {
+  const code = (iata || '').toUpperCase();
+  if (code in FIXED_OFFSETS) return FIXED_OFFSETS[code];
+  if (code in EUROPE_DST)    return EUROPE_DST[code][isEuropeDST(dateStr) ? 'dst' : 'std'];
+  if (code in US_DST)        return US_DST[code][isUsDST(dateStr) ? 'dst' : 'std'];
+  return 7;
+}
+
+function isEuropeDST(ds) {
+  const d = new Date(ds + 'T12:00:00Z'), y = d.getUTCFullYear();
+  return d >= new Date(Date.UTC(y, 2, lastSun(y, 2), 1))
+      && d <  new Date(Date.UTC(y, 9, lastSun(y, 9), 1));
+}
+function isUsDST(ds) {
+  const d = new Date(ds + 'T12:00:00Z'), y = d.getUTCFullYear();
+  let md = 1, sc = 0;
+  while (sc < 2) { if (new Date(Date.UTC(y, 2, md)).getUTCDay() === 0) sc++; if (sc < 2) md++; }
+  let nd = 1;
+  while (new Date(Date.UTC(y, 10, nd)).getUTCDay() !== 0) nd++;
+  return d >= new Date(Date.UTC(y, 2, md, 7)) && d < new Date(Date.UTC(y, 10, nd, 6));
+}
+function lastSun(y, m) {
+  let d = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  while (new Date(Date.UTC(y, m, d)).getUTCDay() !== 0) d--;
+  return d;
+}
+
+/* ---------- ICS helpers ---------- */
+const pad = n => String(n).padStart(2, '0');
+const fmtUtc = d => `${d.getUTCFullYear()}${pad(d.getUTCMonth()+1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}00Z`;
+const fmtDate = ds => ds.replace(/-/g, '');
+
+function localToUtc(dateStr, timeStr, offset) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const [hh, mm] = timeStr.split(':').map(Number);
+  const base = new Date(Date.UTC(y, m - 1, d));
+  base.setUTCMinutes(base.getUTCMinutes() + hh * 60 + mm - offset * 60);
+  return fmtUtc(base);
+}
+function nextDate(ds) {
+  const d = new Date(ds + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + 1);
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
+}
+const uid  = () => 'UID:' + crypto.randomUUID() + '@roster-cal';
+const fold = line => {
+  const out = [];
+  while (line.length > 75) { out.push(line.substring(0, 75)); line = ' ' + line.substring(75); }
+  out.push(line);
+  return out.join('\r\n');
+};
+
+/* ---------- Build ICS ---------- */
+function buildIcs(duties) {
+  const now = fmtUtc(new Date());
+  const L = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//RosterCal//EN',
+    'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:Flight Roster'
+  ];
+
+  for (const d of duties) {
+    if (d.type === 'AL' || d.type === 'SIC') {
+      L.push('BEGIN:VEVENT', uid(), `DTSTAMP:${now}`,
+        `DTSTART;VALUE=DATE:${fmtDate(d.date)}`,
+        `DTEND;VALUE=DATE:${fmtDate(nextDate(d.date))}`,
+        `SUMMARY:${d.type === 'AL' ? 'Annual Leave' : 'Sick Leave'}`,
+        'END:VEVENT');
+      continue;
+    }
+
+    if (d.type === 'DUTY') {
+      const summary = d.summary || d.duty || 'Duty';
+      if (d.start_local && d.end_local) {
+        const arr = d.end_local < d.start_local ? nextDate(d.date) : d.date;
+        L.push('BEGIN:VEVENT', uid(), `DTSTAMP:${now}`,
+          `DTSTART:${localToUtc(d.date, d.start_local, 7)}`,
+          `DTEND:${localToUtc(arr,    d.end_local,   7)}`,
+          fold(`SUMMARY:${summary}`), 'END:VEVENT');
+      } else if (d.start_local) {
+        const dtStart = localToUtc(d.date, d.start_local, 7);
+        const startD  = new Date(`${dtStart.slice(0,4)}-${dtStart.slice(4,6)}-${dtStart.slice(6,8)}T${dtStart.slice(9,11)}:${dtStart.slice(11,13)}:00Z`);
+        const endD    = new Date(startD.getTime() + 60 * 60000);
+        L.push('BEGIN:VEVENT', uid(), `DTSTAMP:${now}`,
+          `DTSTART:${dtStart}`, `DTEND:${fmtUtc(endD)}`,
+          fold(`SUMMARY:${summary}`), 'END:VEVENT');
+      } else {
+        L.push('BEGIN:VEVENT', uid(), `DTSTAMP:${now}`,
+          `DTSTART;VALUE=DATE:${fmtDate(d.date)}`,
+          `DTEND;VALUE=DATE:${fmtDate(nextDate(d.date))}`,
+          fold(`SUMMARY:${summary}`), 'END:VEVENT');
+      }
+      continue;
+    }
+
+    if (!d.start_local || !d.end_local) continue;
+
+    const sOff = d.type === 'GRD' ? 7 : getUtcOffset(d.origin || d.base || 'BKK', d.date);
+    const eOff = d.type === 'GRD' ? 7 : getUtcOffset(d.destination || d.origin || d.base || 'BKK', d.date);
+
+    const arrDate = (d.end_local < d.start_local && (d.type === 'FLT' || d.type === 'P'))
+      ? nextDate(d.date) : d.date;
+    const dtStart = localToUtc(d.date,  d.start_local, sOff);
+    const dtEnd   = localToUtc(arrDate, d.end_local,   eOff);
+
+    let summary, location;
+    if (d.type === 'FLT' || d.type === 'P') {
+      const pfx = d.type === 'P' ? '(DH) ' : '';
+      summary  = `${pfx}${d.duty} ${d.origin || ''}-${d.destination || ''} ${d.start_local}-${d.end_local}`;
+      location = `${d.origin || ''} → ${d.destination || ''}`;
+    } else if (d.type === 'GRD') {
+      summary = `GRD: ${d.duty}`; location = d.origin || d.base || 'BKK';
+    } else if (d.type === 'SBY') {
+      summary = `Standby: ${d.duty}`; location = d.origin || d.base || 'BKK';
+    } else {
+      summary = d.duty || d.type; location = d.origin || d.base || '';
+    }
+
+    L.push('BEGIN:VEVENT', uid(), `DTSTAMP:${now}`,
+      `DTSTART:${dtStart}`, `DTEND:${dtEnd}`,
+      fold(`SUMMARY:${summary}`), fold(`LOCATION:${location}`), 'END:VEVENT');
+
+    const ci = buildCheckin(d, now);
+    if (ci) L.push(...ci);
+  }
+
+  L.push('END:VCALENDAR');
+  return L.join('\r\n');
+}
+
+function buildCheckin(d, now) {
+  if (!d.start_local) return null;
+  let minBefore, loc;
+
+  if ((d.type === 'FLT' || d.type === 'P') && (d.origin || '').toUpperCase() === 'BKK') {
+    minBefore = 120; loc = 'THAI Operations Center (THAI OPC)';
+  } else if (d.type === 'GRD' || d.type === 'SBY') {
+    minBefore = 60;  loc = d.origin || d.base || 'BKK';
+  } else {
+    return null;
+  }
+
+  const offset = d.type === 'GRD' ? 7 : getUtcOffset(d.origin || d.base || 'BKK', d.date);
+  const [y, m, day] = d.date.split('-').map(Number);
+  const [hh, mm]    = d.start_local.split(':').map(Number);
+  const dutyUtc = new Date(Date.UTC(y, m - 1, day, hh, mm));
+  dutyUtc.setUTCMinutes(dutyUtc.getUTCMinutes() - offset * 60);
+  const ciStart = new Date(dutyUtc.getTime() - minBefore * 60000);
+
+  return [
+    'BEGIN:VEVENT', uid(), `DTSTAMP:${now}`,
+    `DTSTART:${fmtUtc(ciStart)}`, `DTEND:${fmtUtc(dutyUtc)}`,
+    fold(`SUMMARY:Check-In: ${d.duty || d.type}`), fold(`LOCATION:${loc}`),
+    'DESCRIPTION:Automated check-in reminder',
+    'BEGIN:VALARM', 'TRIGGER:-PT10M', 'ACTION:DISPLAY',
+    'DESCRIPTION:Check-in in 10 minutes', 'END:VALARM',
+    'END:VEVENT'
+  ];
+}
+
+/* ---------- Download ---------- */
+$('btnDownload').addEventListener('click', () => {
+  if (!parsedDuties.length) return;
+  const ics = buildIcs(parsedDuties);
+  const blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'roster.ics';
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  setTimeout(resetAll, 500);
+});
+</script>
+</body>
+</html>
